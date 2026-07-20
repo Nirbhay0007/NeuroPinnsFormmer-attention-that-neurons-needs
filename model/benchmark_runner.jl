@@ -13,8 +13,8 @@ using JSON
 include("architectures.jl")
 include("loss_and_optimization.jl")
 
-# Fixed Deterministic Seeds across all model comparative evaluations
-const BENCHMARK_SEEDS = [101, 202, 303]
+# Fixed Single Deterministic Seed for 100% Reproducibility & Fast Single-Run Training
+const BENCHMARK_SEEDS = [42]
 
 """
     prepare_dataloader(HH_data::DataFrame, k::Int=10; batch_size::Int=64)
@@ -88,8 +88,6 @@ end
 
 """
     save_checkpoint_weights(save_path::String, model_id::String, seed::Int, flat_params::Vector{Float32}, metrics, loss_history)
-
-Helper to save weight vectors and metrics into JSON checkpoint format.
 """
 function save_checkpoint_weights(save_path::String, model_id::String, seed::Int, flat_params::Vector{Float32}, metrics, loss_history)
     mkpath(dirname(save_path))
@@ -125,11 +123,6 @@ end
 
 """
     save_model_checkpoints(model_id::String, seed::Int, final_model, best_weights, milestone_snapshots, history, final_metrics, HH_data, checkpoint_dir::String)
-
-Saves:
-1. `checkpoint_final.json` (End of training after L-BFGS refinement)
-2. `checkpoint_best.json` (Epoch with lowest composite loss)
-3. `milestones/checkpoint_epoch_<E>.json` (Significant milestone checkpoints at 10%, 25%, 50%, 75%, 90% and Adam handover)
 """
 function save_model_checkpoints(model_id::String, seed::Int, final_model, best_weights::Vector{Float32}, milestone_snapshots::Dict{Int, Vector{Float32}}, history, final_metrics, HH_data, checkpoint_dir::String)
     model_save_dir = joinpath(checkpoint_dir, model_id, "seed_$seed")
@@ -145,7 +138,7 @@ function save_model_checkpoints(model_id::String, seed::Int, final_model, best_w
     best_metrics = evaluate_relative_l2_error(best_model_inst, HH_data)
     save_checkpoint_weights(joinpath(model_save_dir, "checkpoint_best.json"), model_id, seed, best_weights, best_metrics, history.total)
 
-    # 3. Save Significant Milestone Epoch Checkpoints (Intermediate snapshots)
+    # 3. Save Significant Milestone Epoch Checkpoints
     milestone_dir = joinpath(model_save_dir, "milestones")
     for (ep, w_vec) in milestone_snapshots
         m_inst = re(w_vec)
@@ -157,12 +150,9 @@ function save_model_checkpoints(model_id::String, seed::Int, final_model, best_w
 end
 
 """
-    load_model_checkpoint(model_id::String, seed::Int, checkpoint_type::String="best"; k_val::Int=10, checkpoint_dir::String="")
-
-Loads saved network parameters from disk and reinjects them into a fresh model architecture instance.
-checkpoint_type can be "best", "final", or "epoch_500" for instant evaluation without retraining.
+    load_model_checkpoint(model_id::String, seed::Int=42, checkpoint_type::String="best"; k_val::Int=10, checkpoint_dir::String="")
 """
-function load_model_checkpoint(model_id::String, seed::Int; checkpoint_type::String="best", k_val::Int=10, checkpoint_dir::String="")
+function load_model_checkpoint(model_id::String, seed::Int=42; checkpoint_type::String="best", k_val::Int=10, checkpoint_dir::String="")
     if isempty(checkpoint_dir)
         checkpoint_dir = raw"C:\nirbhay\Downloads\NeuroPinnsFormmer-attention-that-neurons-needs\detailed_pinnsformmer_reports\checkpoints"
     end
@@ -214,11 +204,10 @@ function instantiate_model(model_id::String, k::Int)
 end
 
 """
-    train_model_single_run(model, dataloader; adam_epochs=1000, lbfgs_epochs=200, use_ntk=true)
-
-Executes dual-stage optimization while capturing best weights & milestone epoch snapshots.
+    train_model_single_run(model, dataloader; adam_epochs=1000, lbfgs_epochs=200, use_ntk=true, seed=42)
 """
-function train_model_single_run(model, dataloader; adam_epochs=1000, lbfgs_epochs=200, use_ntk=true)
+function train_model_single_run(model, dataloader; adam_epochs=1000, lbfgs_epochs=200, use_ntk=true, seed=42)
+    Random.seed!(seed)
     I_ext = 10.0f0
     λ_state = NTKState()
     opt_adam = Flux.setup(Flux.Adam(1e-3), model)
@@ -228,7 +217,6 @@ function train_model_single_run(model, dataloader; adam_epochs=1000, lbfgs_epoch
     best_weights, _ = Flux.destructure(model)
     milestone_snapshots = Dict{Int, Vector{Float32}}()
 
-    # Milestone intervals (e.g. 10%, 25%, 50%, 75%, 100% of Adam epochs)
     milestone_epochs = [
         max(1, div(adam_epochs, 10)),
         div(adam_epochs, 4),
@@ -256,14 +244,12 @@ function train_model_single_run(model, dataloader; adam_epochs=1000, lbfgs_epoch
         end
         push!(loss_history, total_epoch_loss)
 
-        # Track best weights
         if total_epoch_loss < best_loss
             best_loss = total_epoch_loss
             w_flat, _ = Flux.destructure(model)
             best_weights = copy(w_flat)
         end
 
-        # Capture milestone snapshot
         if epoch in milestone_epochs
             w_flat, _ = Flux.destructure(model)
             milestone_snapshots[epoch] = copy(w_flat)
@@ -321,12 +307,12 @@ function run_benchmark_suite(; adam_epochs=1000, lbfgs_epochs=200, seeds=BENCHMA
     checkpoint_dir = raw"C:\nirbhay\Downloads\NeuroPinnsFormmer-attention-that-neurons-needs\detailed_pinnsformmer_reports\checkpoints"
 
     println("=========================================================================")
-    println("REPRODUCIBLE MULTI-SEED BENCHMARK & CHECKPOINT SERIALIZATION SUITE")
-    println("Deterministic Seeds: $seeds")
+    println("REPRODUCIBLE SINGLE-SEED BENCHMARK & CHECKPOINT SERIALIZATION SUITE")
+    println("Deterministic Seed: $seeds")
     println("=========================================================================\n")
 
     for id in model_ids
-        println("--> Benchmarking Model: [$id] across deterministic seeds $seeds...")
+        println("--> Benchmarking Model: [$id] with seed $seeds...")
         k_val = id == "M6" ? 8 : 10
         dataloader, _, _ = prepare_dataloader(HH_data, k_val; batch_size=64)
         use_ntk = id != "M5"
@@ -346,14 +332,14 @@ function run_benchmark_suite(; adam_epochs=1000, lbfgs_epochs=200, seeds=BENCHMA
                 model_inst, dataloader; 
                 adam_epochs=adam_epochs, 
                 lbfgs_epochs=lbfgs_epochs, 
-                use_ntk=use_ntk
+                use_ntk=use_ntk,
+                seed=seed
             )
             
             eval_metrics = evaluate_relative_l2_error(trained_m, HH_data)
             push!(seed_l2_errors, eval_metrics.l2_total)
             push!(seed_runtimes, wall_time)
 
-            # SAVE FULL MULTI-MILESTONE CHECKPOINT PACKAGE TO DISK
             save_model_checkpoints(id, seed, trained_m, best_w, milestones, history, eval_metrics, HH_data, checkpoint_dir)
 
             if eval_metrics.l2_total < best_l2
@@ -363,10 +349,10 @@ function run_benchmark_suite(; adam_epochs=1000, lbfgs_epochs=200, seeds=BENCHMA
         end
 
         mean_l2 = mean(seed_l2_errors)
-        std_l2 = std(seed_l2_errors)
+        std_l2 = length(seed_l2_errors) > 1 ? std(seed_l2_errors) : 0.0
         mean_time = mean(seed_runtimes)
 
-        println("    Params: $param_count | Mean Rel L2: $(round(mean_l2, digits=6)) ± $(round(std_l2, digits=6)) | Time: $(round(mean_time, digits=2))s")
+        println("    Params: $param_count | Rel L2 Error: $(round(mean_l2, digits=6)) | Time: $(round(mean_time, digits=2))s")
 
         results_dict[id] = Dict(
             "model_id" => id,
@@ -390,6 +376,6 @@ function run_benchmark_suite(; adam_epochs=1000, lbfgs_epochs=200, seeds=BENCHMA
     open(json_path, "w") do io
         JSON.print(io, results_dict, 4)
     end
-    println("\n[SUCCESS] Checkpoint serialization complete! All weights saved to $checkpoint_dir")
+    println("\n[SUCCESS] Single-seed (seed=42) benchmark complete! All weights saved to $checkpoint_dir")
     return results_dict
 end
