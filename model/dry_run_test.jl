@@ -304,6 +304,10 @@ function generate_trajectories(t_batch; k_fine=100, k_coarse=10, dt_fine=0.05f0,
     end
 end
 
+Zygote.@adjoint function generate_trajectories(t_batch; k_fine=100, k_coarse=10, dt_fine=0.05f0, dt_coarse=0.5f0)
+    return generate_trajectories(t_batch; k_fine=k_fine, k_coarse=k_coarse), Δ -> (nothing,)
+end
+
 function (m::PINNsFormer)(t_batch)
     k_fine = size(m.pe_fine, 2)
     k_coarse = size(m.pe_coarse, 2)
