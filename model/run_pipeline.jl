@@ -284,17 +284,16 @@ end
 function generate_trajectories(t_batch; k_fine=100, k_coarse=10, dt_fine=0.05f0, dt_coarse=0.5f0)
     if eltype(t_batch) <: ForwardDiff.Dual
         Batch = size(t_batch, 3)
-        # Functional array comprehension (100% non-mutating, no setindex!)
         T_fine = [
             ForwardDiff.Dual{Nothing, Float32, k_fine}(
                 ForwardDiff.value(t_batch[1, 1, b]) + (i - 1) * dt_fine,
-                ntuple(j -> (j == i ? 1.0f0 : 0.0f0), k_fine)
+                ForwardDiff.Partials(ntuple(j -> (j == i ? 1.0f0 : 0.0f0), k_fine))
             ) for c in 1:1, i in 1:k_fine, b in 1:Batch
         ]
         T_coarse = [
             ForwardDiff.Dual{Nothing, Float32, k_fine}(
                 ForwardDiff.value(t_batch[1, 1, b]) + (j - 1) * dt_coarse,
-                ntuple(i -> 0.0f0, k_fine)
+                ForwardDiff.Partials(ntuple(i -> 0.0f0, k_fine))
             ) for c in 1:1, j in 1:k_coarse, b in 1:Batch
         ]
         return T_fine, T_coarse
