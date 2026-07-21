@@ -20,6 +20,7 @@ using Zygote
 using Optim
 using Printf
 using Serialization
+import Zygote.ChainRulesCore # Tangent & NoTangent support
 
 
 # --- Notebook Cell ---
@@ -338,23 +339,37 @@ Zygote.@adjoint function NNlib.dropout(rng::Random.AbstractRNG, x::AbstractArray
     return x, Δ -> (nothing, Δ, nothing, nothing)
 end
 
-function extract_diagonal_partials(X_dual::Array{ForwardDiff.Dual{T, F, N}, 3}) where {T, F, N}
-    return [X_dual[c, i, b].partials[i] for c in 1:4, i in 1:size(X_dual, 2), b in 1:size(X_dual, 3)]
+function extract_primal_and_partials(X_dual::Array{ForwardDiff.Dual{T, F, N}, 3}) where {T, F, N}
+    c_dim, k_steps, batch_dim = size(X_dual)
+    X_pred = Array{F, 3}(undef, c_dim, k_steps, batch_dim)
+    dX_dt  = Array{F, 3}(undef, c_dim, k_steps, batch_dim)
+    for b in 1:batch_dim, i in 1:k_steps, c in 1:c_dim
+        d = X_dual[c, i, b]
+        X_pred[c, i, b] = d.value
+        dX_dt[c, i, b]  = d.partials[i]
+    end
+    return X_pred, dX_dt
 end
 
-Zygote.@adjoint function extract_diagonal_partials(X_dual::Array{ForwardDiff.Dual{T, F, N}, 3}) where {T, F, N}
-    dX_dt = extract_diagonal_partials(X_dual)
-    k_steps = size(X_dual, 2)
-    Batch = size(X_dual, 3)
+Zygote.@adjoint function extract_primal_and_partials(X_dual::Array{ForwardDiff.Dual{T, F, N}, 3}) where {T, F, N}
+    X_pred, dX_dt = extract_primal_and_partials(X_dual)
+    c_dim, k_steps, batch_dim = size(X_dual)
     function back(Δ)
-        dX_dual = Array{ForwardDiff.Dual{T, F, N}, 3}(undef, 4, k_steps, Batch)
-        for b in 1:Batch, i in 1:k_steps, c in 1:4
-            p = ntuple(j -> (j == i ? Δ[c, i, b] : 0.0f0), k_steps)
-            dX_dual[c, i, b] = ForwardDiff.Dual{T, F, N}(0.0f0, ForwardDiff.Partials(p))
+        Δ_pred = Δ[1]
+        Δ_dX   = Δ[2]
+        d_p = (isnothing(Δ_pred) || repr(typeof(Δ_pred)) == "ChainRulesCore.NoTangent") ? zeros(F, c_dim, k_steps, batch_dim) : Δ_pred
+        d_d = (isnothing(Δ_dX) || repr(typeof(Δ_dX)) == "ChainRulesCore.NoTangent") ? zeros(F, c_dim, k_steps, batch_dim) : Δ_dX
+        
+        dX_dual = Array{ForwardDiff.Dual{T, F, N}, 3}(undef, c_dim, k_steps, batch_dim)
+        for b in 1:batch_dim, i in 1:k_steps, c in 1:c_dim
+            val_g = Float32(d_p[c, i, b])
+            part_g = Float32(d_d[c, i, b])
+            p = ntuple(j -> (j == i ? part_g : 0.0f0), k_steps)
+            dX_dual[c, i, b] = ForwardDiff.Dual{T, F, N}(val_g, ForwardDiff.Partials(p))
         end
         return (dX_dual,)
     end
-    return dX_dt, back
+    return (X_pred, dX_dt), back
 end
 
 function make_dual_inputs(t, k_steps)
@@ -378,9 +393,7 @@ function compute_ad_derivatives(model, t_tensor)
     k_steps = size(model.pe_fine, 2)
     t_dual = make_dual_inputs(t_tensor, k_steps)
     X_dual = model(t_dual)
-    X_pred = [X_dual[c, i, b].value for c in 1:4, i in 1:k_steps, b in 1:size(t_tensor, 3)]
-    dX_dt = extract_diagonal_partials(X_dual)
-    return X_pred, dX_dt
+    return extract_primal_and_partials(X_dual)
 end
 
 function compute_physics_residuals(X_pred, dX_pred_dt, I_ext_value=10.0f0)
